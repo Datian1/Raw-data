@@ -1,0 +1,2052 @@
+library(limma)          
+expFile="merge.txt"      
+geneFile="gene.txt"    
+setwd()    
+
+
+rt=read.table(expFile, header=T, sep="\t", check.names=F)
+rt=as.matrix(rt)
+rownames(rt)=rt[,1]
+exp=rt[,2:ncol(rt)]
+dimnames=list(rownames(exp),colnames(exp))
+data=matrix(as.numeric(as.matrix(exp)),nrow=nrow(exp),dimnames=dimnames)
+data=avereps(data)
+data=data[rowMeans(data)>0,]
+
+gene=read.table(geneFile, header=T, sep="\t", check.names=F)
+sameGene=intersect(as.vector(gene[,1]), rownames(data))
+geneExp=data[sameGene,]
+
+out=rbind(ID=colnames(geneExp),geneExp)
+write.table(out,file="GeneExp.txt",sep="\t",quote=F,col.names=F)
+
+
+library(limma)
+library(survival)
+library(survminer)
+expFile="差异蛋白评分关键基因.txt"     
+cliFile="time.txt"           
+setwd()    
+
+rt=read.table(expFile, header=T, sep="\t", check.names=F,row.names = 1)
+rt=as.matrix(rt)
+rownames(rt)=rt[,1]
+exp=rt[,2:ncol(rt)]
+dimnames=list(rownames(exp), colnames(exp))
+data=matrix(as.numeric(as.matrix(exp)), nrow=nrow(exp), dimnames=dimnames)
+data=avereps(data)
+data=data[rowMeans(data)>0,]
+data=t(data)
+rownames(data)=gsub("(.*?)\\_(.*?)", "\\2", rownames(data))
+
+cli=read.table(cliFile, header=T, sep="\t", check.names=F, row.names=1)     
+
+
+
+sameSample=intersect(row.names(rt), row.names(cli))
+data1=rt[sameSample,]
+cli=cli[sameSample,]
+rt=cbind(cli, data1)
+
+
+outTab=data.frame()
+km=c()
+for(i in colnames(rt[,3:ncol(rt)])){
+  
+  cox <- coxph(Surv(futime, fustat) ~ rt[,i], data = rt)
+  coxSummary = summary(cox)
+  coxP=coxSummary$coefficients[,"Pr(>|z|)"]
+  outTab=rbind(outTab,
+               cbind(id=i,
+                     HR=coxSummary$conf.int[,"exp(coef)"],
+                     HR.95L=coxSummary$conf.int[,"lower .95"],
+                     HR.95H=coxSummary$conf.int[,"upper .95"],
+                     pvalue=coxSummary$coefficients[,"Pr(>|z|)"])
+  )
+
+  data=rt[,c("futime", "fustat", i)]
+  colnames(data)=c("futime", "fustat", "gene")
+
+  res.cut=surv_cutpoint(data, time = "futime", event = "fustat", variables =c("gene"))
+  res.cat=surv_categorize(res.cut)
+  fit=survfit(Surv(futime, fustat) ~gene, data = res.cat)
+
+  diff=survdiff(Surv(futime, fustat) ~gene,data =res.cat)
+  pValue=1-pchisq(diff$chisq, df=1)
+  km=c(km, pValue)
+
+  if(pValue<0.05){
+    if(pValue<0.001){
+      pValue="p<0.001"
+    }else{
+      pValue=paste0("p=",sprintf("%.03f",pValue))
+    }
+    
+  
+    surPlot=ggsurvplot(fit,
+                       data=res.cat,
+                       pval=pValue,
+                       pval.size=6,
+                       legend.title=i,
+                       legend.labs=c("high","low"),
+                       xlab="Time(years)",
+                       ylab="Overall survival",
+                       palette=c("red", "blue"),
+                       break.time.by=1,
+                       conf.int=F,
+                       risk.table=TRUE,
+                       risk.table.title="",
+                       risk.table.height=.25)
+    pdf(file=paste0("sur.", i, ".pdf"),onefile = FALSE,
+        width = 6,         
+        height =5)         
+    print(surPlot)
+    dev.off()
+  }
+}
+
+outTab=cbind(outTab, km)
+write.table(outTab,file="uniCox.txt",sep="\t",row.names=F,quote=F)
+
+
+
+
+library(igraph)
+library(psych)
+library(reshape2)
+library("RColorBrewer")
+GeneExpfile <- "m6aGeneExp.txt"     
+Genefile <- "gene.txt"            
+Coxfile <- "uniCox.txt"             
+setwd()      
+
+
+gene.group <- read.table(Genefile,header=T,sep="\t")
+gene.exp <- read.table(GeneExpfile,header=T,sep="\t",row.names=1)
+gene.cox <- read.table(Coxfile,header=T,sep="\t")
+
+
+colnames(gene.group) <- c('id','group')
+genelist <- intersect(gene.group$id, gene.cox$id)
+genelist <- intersect(genelist, rownames(gene.exp))
+gene.group <- gene.group[match(genelist,gene.group$id),]
+gene.group <- gene.group[order(gene.group$group),]
+gene.exp <- gene.exp[match(gene.group$id,rownames(gene.exp)),]
+gene.cox <- gene.cox[match(gene.group$id,gene.cox$id),]
+
+
+gene.cor <- corr.test(t(gene.exp))
+gene.cor.cor <- gene.cor$r
+gene.cor.pvalue <- gene.cor$p
+gene.cor.cor[upper.tri(gene.cor.cor)] = NA
+gene.cor.pvalue[upper.tri(gene.cor.pvalue)] = NA
+gene.cor.cor.melt <- melt(gene.cor.cor)   #gene1 \t gene2 \t cor
+gene.cor.pvalue.melt <- melt(gene.cor.pvalue)
+gene.melt <- data.frame(from = gene.cor.cor.melt$Var2,to=gene.cor.cor.melt$Var1,cor=gene.cor.cor.melt$value,pvalue=gene.cor.pvalue.melt$value)
+gene.melt <- gene.melt[gene.melt$from!=gene.melt$to&!is.na(gene.melt$pvalue),,drop=F]
+gene.edge <- gene.melt[gene.melt$pvalue<0.0001,,drop=F]
+gene.edge$color <- ifelse(gene.edge$cor>0,'pink','#6495ED')
+gene.edge$weight <- abs(gene.edge$cor)*6
+
+
+gene.node <- gene.group
+#group.color <- colorRampPalette(brewer.pal(9, "Set1"))(length(unique(gene.node$group)))
+#gene.node$color <- group.color[as.numeric(as.factor(gene.node$group))]
+gene.node$shape <- "circle"
+gene.node$frame <- ifelse(gene.cox$HR>1,'purple',"green")
+gene.node$pvalue <- gene.cox$pvalue
+# pvalue size
+pvalue.breaks <- c(0,0.0001,0.001,0.01,0.05,1)
+pvalue.size <- c(16,14,12,10,8)
+cutpvalue <- cut(gene.node$pvalue,breaks=pvalue.breaks)
+gene.node$size <- pvalue.size[as.numeric(cutpvalue)]
+nodefile <- "network.node.txt"
+edgefile <- "network.edge.txt"
+write.table(gene.node, nodefile, sep="\t", col.names=T, row.names=F, quote=F)
+write.table(gene.edge, edgefile, sep="\t", col.names=T, row.names=F, quote=F)
+
+
+node = read.table(nodefile, header=T, sep="\t", comment.char="")
+edge = read.table(edgefile, header=T, sep="\t", comment.char="")
+
+g = graph.data.frame(edge,directed = FALSE)
+node = node[match(names(components(g)$membership),node$id),]
+
+if(!is.na(match('color',colnames(node)))) V(g)$color = node$color
+if(!is.na(match('size',colnames(node)))) V(g)$size = node$size
+if(!is.na(match('shape',colnames(node)))) V(g)$shape = node$shape
+if(!is.na(match('frame',colnames(node)))) V(g)$frame = node$frame
+
+
+pdf(file="network.pdf", width=10, height=8)
+par(mar=c(0,0,0,0))
+layout(matrix(c(1,1,4,2,3,4),nc=2),height=c(4,4,2),width=c(8,3))
+
+
+coord = layout_in_circle(g)
+degree.x = acos(coord[,1])
+degree.y = asin(coord[,2])
+degree.alpha = c()
+for(i in 1:length(degree.x)){
+  if(degree.y[i]<0) degree.alpha=c(degree.alpha,2*pi-degree.x[i]) else degree.alpha=c(degree.alpha,degree.x[i])
+}
+degree.cut.group = (0:8)/4*pi
+degree.cut.group[1] = -0.0001
+degree.cut = cut(degree.alpha,degree.cut.group)
+degree.degree = c(-pi/4,-pi/4,-pi/2,-pi/2,pi/2,pi/2,pi/2,pi/4)
+degree = degree.degree[as.numeric(degree.cut)]
+
+
+values <- lapply(node$id,function(x)c(1,1))
+V(g)$pie.color = lapply(1:nrow(node),function(x)c(node$color[x],node$frame[x]))
+V(g)$frame = NA 
+
+
+plot(g,layout=layout_in_circle,vertex.shape="pie",vertex.pie=values,
+     vertex.label.cex=V(g)$lable.cex,edge.width = E(g)$weight,edge.arrow.size=0,
+     vertex.label.color=V(g)$color,vertex.frame.color=V(g)$frame,edge.color=E(g)$color,
+     vertex.label.cex=2,vertex.label.font=2,vertex.size=V(g)$size,edge.curved=0.4,
+     vertex.color=V(g)$color,vertex.label.dist=1,vertex.label.degree=degree)
+# label.degree : zero means to the right; and pi means to the left; up is -pi/2 and down is pi/2;  The default value is -pi/4
+# label.dist If it is 0 then the label is centered on the vertex; If it is 1 then the label is displayed beside the vertex.
+
+
+par(mar=c(0,0,0,0))
+plot(1,type="n",xlab="",ylab="",axes=F)
+groupinfo = unique(data.frame(group=node$group,color=node$color))
+legend("left",legend=groupinfo$group,col=groupinfo$color,pch=16,bty="n",cex=3)
+
+par(mar=c(0,0,0,0))
+plot(1,type="n",xlab="",ylab="",axes=F)
+legend("left",legend=c('Risk factors','Favorable factors'),col=c('purple','green'),pch=16,bty="n",cex=2.5)
+
+par(mar=c(0,0,0,0))
+plot(1,type="n",xlab="",axes=F,ylab="")
+legend("top",legend=c('Postive correlation with P<0.0001','Negative correlation with P<0.0001'),lty=1,lwd=4,col=c('pink','#6495ED'),bty="n",cex=2.2)
+legend('bottom',legend=c(0.0001,0.001,0.01,0.05,1),pch=16,pt.cex=c(1.6,1.4,1.2,1,0.8)*6,bty="n",ncol=5,cex=2.2,col="black",title="Cox test, pvalue")
+dev.off()
+
+
+
+library(ConsensusClusterPlus)
+expFile="m6aGeneExp.txt"      
+setwd(workDir)       
+
+data=read.table(expFile, header=T, sep="\t", check.names=F, row.names=1)
+data=as.matrix(data)
+
+
+maxK=9
+results=ConsensusClusterPlus(data,
+                             maxK=maxK,
+                             reps=50,
+                             pItem=0.8,
+                             pFeature=1,
+                             title=workDir,
+                             clusterAlg="pam",
+                             distance="euclidean",
+                             seed=123456,
+                             plot="png")
+
+
+
+clusterNum=2      
+cluster=results[[clusterNum]][["consensusClass"]]
+cluster=as.data.frame(cluster)
+colnames(cluster)=c("m6Acluster")
+letter=c("A","B","C","D","E","F","G")
+uniqClu=levels(factor(cluster$m6Acluster))
+cluster$m6Acluster=letter[match(cluster$m6Acluster, uniqClu)]
+clusterOut=rbind(ID=colnames(cluster), cluster)
+write.table(clusterOut, file="Cluster.txt", sep="\t", quote=F, col.names=F)
+
+
+
+
+library(survival)
+library(survminer)
+clusterFile="蛋白组expTime.txt"     
+cliFile="time.txt"             
+setwd()      
+
+
+cluster=read.table(clusterFile, header=T, sep="\t", check.names=F, row.names=1)
+rownames(cluster)=gsub("(.*?)\\_(.*?)", "\\2", rownames(cluster))
+cli=read.table(cliFile, header=T, sep="\t", check.names=F, row.names=1)
+colnames(cli)=c("futime", "fustat")
+cli$futime=cli$futime/365
+
+
+sameSample=intersect(row.names(cluster), row.names(cli))
+rt=cbind(cli[sameSample,,drop=F], cluster[sameSample,,drop=F])
+
+
+length=length(levels(factor(rt$m6Acluster)))
+diff=survdiff(Surv(futime, fustat) ~ m6Acluster, data = rt)
+pValue=1-pchisq(diff$chisq, df=length-1)
+if(pValue<0.001){
+  pValue="p<0.001"
+}else{
+  pValue=paste0("p=",sprintf("%.03f",pValue))
+}
+fit <- survfit(Surv(futime, fustat) ~ m6Acluster, data = rt)
+#print(surv_median(fit))
+
+
+bioCol=c("#0066FF","#FF9900","#FF0000","#6E568C","#7CC767","#223D6C","#D20A13","#FFD121","#088247","#11AA4D")
+bioCol=bioCol[1:length]
+surPlot=ggsurvplot(fit, 
+                   data=rt,
+                   conf.int=F,
+                   pval=pValue,
+                   pval.size=6,
+                   legend.title="m6Acluster",
+                   legend.labs=levels(factor(rt[,"m6Acluster"])),
+                   legend = c(0.8, 0.8),
+                   font.legend=10,
+                   xlab="Time(years)",
+                   break.time.by = 1,
+                   palette = bioCol,
+                   surv.median.line = "hv",
+                   risk.table=T,
+                   cumevents=F,
+                   risk.table.height=.25)
+pdf(file="survival.pdf",onefile = FALSE,width=7,height=5.5)
+print(surPlot)
+dev.off()
+
+
+
+
+library(pheatmap)        
+expFile="m6aGeneExp.txt"         
+clusterFile="m6aCluster.txt"    
+cliFile="clinical.txt"         
+setwd()     
+
+
+exp=read.table(expFile, header=T, sep="\t", check.names=F, row.names=1)
+exp=t(exp)
+cluster=read.table(clusterFile, header=T, sep="\t", check.names=F, row.names=1)
+
+sameSample=intersect(row.names(exp), row.names(cluster))
+exp=exp[sameSample, , drop=F]
+cluster=cluster[sameSample, , drop=F]
+expCluster=cbind(exp, cluster)
+Project=gsub("(.*?)\\_.*", "\\1", rownames(expCluster))
+rownames(expCluster)=gsub("(.*?)\\_(.*?)", "\\2", rownames(expCluster))
+expCluster=cbind(expCluster, Project)
+
+cli=read.table(cliFile, header=T, sep="\t", check.names=F, row.names=1)
+sameSample=intersect(row.names(expCluster), row.names(cli))
+expCluster=expCluster[sameSample,,drop=F]
+cli=cli[sameSample,,drop=F]
+data=cbind(expCluster, cli)
+
+
+data=data[order(data$m6Acluster),]
+Type=data[,((ncol(exp)+1):ncol(data))]
+data=t(data[,1:ncol(exp)])
+
+
+bioCol=c("#0066FF","#FF9900","#FF0000","#6E568C","#7CC767","#223D6C","#D20A13","#FFD121","#088247","#11AA4D")
+ann_colors=list()
+m6aCluCol=bioCol[1:length(levels(factor(Type$m6Acluster)))]
+names(m6aCluCol)=levels(factor(Type$m6Acluster))
+ann_colors[["m6Acluster"]]=m6aCluCol
+
+pdf("heatmap.pdf", height=5, width=8)
+pheatmap(data,
+         annotation=Type,
+         annotation_colors = ann_colors,
+         color = colorRampPalette(c(rep("blue",5), "white", rep("red",5)))(100),
+         cluster_cols =F,
+         cluster_rows =F,
+         scale="row",
+         show_colnames=F,
+         fontsize=6,
+         fontsize_row=6,
+         fontsize_col=6)
+dev.off()
+
+
+
+
+
+library(limma)
+library(GSEABase)
+library(GSVA)
+library(pheatmap)
+expFile="merge.txt"             
+clusterFile="m6aCluster.txt"     
+gmtFile="c2.cp.kegg.v7.2.symbols.gmt"                    
+setwd()     
+
+
+rt=read.table(expFile, header=T, sep="\t", check.names=F)
+rt=as.matrix(rt)
+rownames(rt)=rt[,1]
+exp=rt[,2:ncol(rt)]
+dimnames=list(rownames(exp), colnames(exp))
+data=matrix(as.numeric(as.matrix(exp)), nrow=nrow(exp), dimnames=dimnames)
+data=avereps(data)
+
+
+geneSets=getGmt(gmtFile, geneIdType=SymbolIdentifier())
+gsvaResult=gsva(data, 
+                geneSets, 
+                min.sz=10, 
+                max.sz=500, 
+                verbose=TRUE,
+                parallel.sz=1)
+gsvaOut=rbind(id=colnames(gsvaResult), gsvaResult)
+write.table(gsvaOut, file="gsvaOut.txt", sep="\t", quote=F, col.names=F)
+
+
+cluster=read.table(clusterFile, header=T, sep="\t", check.names=F, row.names=1)
+
+
+gsvaResult=t(gsvaResult)
+sameSample=intersect(row.names(gsvaResult), row.names(cluster))
+gsvaResult=gsvaResult[sameSample,,drop=F]
+cluster=cluster[sameSample,,drop=F]
+gsvaCluster=cbind(gsvaResult, cluster)
+Project=gsub("(.*?)\\_.*", "\\1", rownames(gsvaCluster))
+gsvaCluster=cbind(gsvaCluster, Project)
+
+
+adj.P.Val.Filter=0.05
+allType=as.vector(gsvaCluster$m6Acluster)
+comp=combn(levels(factor(allType)), 2)
+for(i in 1:ncol(comp)){
+  
+  treat=gsvaCluster[gsvaCluster$m6Acluster==comp[2,i],]
+  con=gsvaCluster[gsvaCluster$m6Acluster==comp[1,i],]
+  data=rbind(con, treat)
+  
+  Type=as.vector(data$m6Acluster)
+  ann=data[,c(ncol(data), (ncol(data)-1))]
+  data=t(data[,-c((ncol(data)-1), ncol(data))])
+  design=model.matrix(~0+factor(Type))
+  colnames(design)=levels(factor(Type))
+  fit=lmFit(data, design)
+  contrast=paste0(comp[2,i], "-", comp[1,i])
+  cont.matrix=makeContrasts(contrast, levels=design)
+  fit2=contrasts.fit(fit, cont.matrix)
+  fit2=eBayes(fit2)
+  
+ 
+  allDiff=topTable(fit2,adjust='fdr',number=200000)
+  allDiffOut=rbind(id=colnames(allDiff),allDiff)
+  write.table(allDiffOut, file=paste0(contrast, ".all.txt"), sep="\t", quote=F, col.names=F)
+  
+
+  diffSig=allDiff[with(allDiff, (abs(logFC)>0.1 & adj.P.Val < adj.P.Val.Filter )), ]
+  diffSigOut=rbind(id=colnames(diffSig),diffSig)
+  write.table(diffSigOut, file=paste0(contrast, ".diff.txt"), sep="\t", quote=F, col.names=F)
+  
+
+  bioCol=c("#0066FF","#FF9900","#FF0000","#6E568C","#7CC767","#223D6C","#D20A13","#FFD121","#088247","#11AA4D")
+  ann_colors=list()
+  m6aCluCol=bioCol[1:length(levels(factor(allType)))]
+  names(m6aCluCol)=levels(factor(allType))
+  ann_colors[["m6Acluster"]]=m6aCluCol[c(comp[1,i], comp[2,i])]
+  
+
+  termNum=20
+  diffTermName=as.vector(rownames(diffSig))
+  diffLength=length(diffTermName)
+  if(diffLength<termNum){termNum=diffLength}
+  hmGene=diffTermName[1:termNum]
+  hmExp=data[hmGene,]
+  pdf(file=paste0(contrast,".heatmap.pdf"),height=6,width=10)
+  pheatmap(hmExp, 
+           annotation=ann,
+           annotation_colors = ann_colors,
+           color = colorRampPalette(c(rep("blue",2), "white", rep("red",2)))(50),
+           cluster_cols =F,
+           show_colnames = F,
+           gaps_col=as.vector(cumsum(table(Type))),
+           scale="row",
+           fontsize = 10,
+           fontsize_row=7,
+           fontsize_col=10)
+  dev.off()
+}
+
+
+
+
+library(reshape2)
+library(ggpubr)
+library(limma)
+library(GSEABase)
+library(GSVA)
+expFile="merge.txt"           
+gmtFile="immune.gmt"      
+clusterFile="m6aCluster.txt"      
+setwd()     
+
+rt=read.table(expFile, header=T, sep="\t", check.names=F)
+rt=as.matrix(rt)
+rownames(rt)=rt[,1]
+exp=rt[,2:ncol(rt)]
+dimnames=list(rownames(exp),colnames(exp))
+data=matrix(as.numeric(as.matrix(exp)),nrow=nrow(exp),dimnames=dimnames)
+data=avereps(data)
+
+
+geneSets=getGmt(gmtFile, geneIdType=SymbolIdentifier())
+
+
+ssgseaScore=gsva(data, geneSets, method='ssgsea', kcdf='Gaussian', abs.ranking=TRUE)
+
+normalize=function(x){
+  return((x-min(x))/(max(x)-min(x)))}
+ssgseaScore=normalize(ssgseaScore)
+
+ssgseaOut=rbind(id=colnames(ssgseaScore), ssgseaScore)
+write.table(ssgseaOut,file="ssGSEA.result.txt",sep="\t",quote=F,col.names=F)
+
+cluster=read.table(clusterFile, header=T, sep="\t", check.names=F, row.names=1)
+
+
+ssgseaScore=t(ssgseaScore)
+sameSample=intersect(row.names(ssgseaScore), row.names(cluster))
+ssgseaScore=ssgseaScore[sameSample,,drop=F]
+cluster=cluster[sameSample,,drop=F]
+scoreCluster=cbind(ssgseaScore, cluster)
+
+data=melt(scoreCluster, id.vars=c("m6Acluster"))
+colnames(data)=c("m6Acluster", "Immune", "Fraction")
+
+
+bioCol=c("#0066FF","#FF9900","#FF0000","#6E568C","#7CC767","#223D6C","#D20A13","#FFD121","#088247","#11AA4D")
+bioCol=bioCol[1:length(levels(factor(data[,"m6Acluster"])))]
+p=ggboxplot(data, x="Immune", y="Fraction", color="m6Acluster", 
+            ylab="Immune infiltration",
+            xlab="",
+            legend.title="m6Acluster",
+            palette=bioCol)
+p=p+rotate_x_text(50)
+pdf(file="boxplot.pdf", width=8, height=6.5)                         
+p+stat_compare_means(aes(group=m6Acluster),symnum.args=list(cutpoints = c(0, 0.001, 0.01, 0.05, 1), symbols = c("***", "**", "*", "ns")),label = "p.signif")
+dev.off()
+
+
+
+
+library(limma)
+library(ggplot2)
+expFile="m6aGeneExp.txt"         
+clusterFile="m6aCluster.txt"    
+setwd()     
+
+
+rt=read.table(expFile, header=T, sep="\t", check.names=F)
+rt=as.matrix(rt)
+rownames(rt)=rt[,1]
+exp=rt[,2:ncol(rt)]
+dimnames=list(rownames(exp),colnames(exp))
+data=matrix(as.numeric(as.matrix(exp)),nrow=nrow(exp),dimnames=dimnames)
+data=avereps(data)
+data=data[rowMeans(data)>0,]
+data=t(data)
+
+
+data.pca=prcomp(data, scale. = TRUE)
+pcaPredict=predict(data.pca)
+write.table(pcaPredict, file="newTab.xls", quote=F, sep="\t")
+
+cluster=read.table(clusterFile, header=T, sep="\t", check.names=F, row.names=1)
+m6Acluster=as.vector(cluster[,1])
+
+
+bioCol=c("#0066FF","#FF9900","#FF0000","#6E568C","#7CC767","#223D6C","#D20A13","#FFD121","#088247","#11AA4D")
+m6aCluCol=bioCol[1:length(levels(factor(m6Acluster)))]
+
+
+PCA=data.frame(PC1=pcaPredict[,1], PC2=pcaPredict[,2], m6Acluster=m6Acluster)
+PCA.mean=aggregate(PCA[,1:2], list(m6Acluster=PCA$m6Acluster), mean)
+pdf(file="PCA.pdf", height=5, width=6.5)
+ggplot(data = PCA, aes(PC1, PC2)) + geom_point(aes(color = m6Acluster)) +
+  scale_colour_manual(name="m6Acluster", values =m6aCluCol)+
+  theme_bw()+
+  theme(plot.margin=unit(rep(1.5,4),'lines'))+
+  annotate("text",x=PCA.mean$PC1, y=PCA.mean$PC2, label=PCA.mean$m6Acluster, cex=7)+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+dev.off()
+
+
+
+
+
+library(limma) 
+library(VennDiagram)
+expFile="merge.txt"          
+cluFile="Cluster.txt"      
+adj.P.Val.Filter=0.01      
+setwd()      
+
+
+rt=read.table(expFile, header=T, sep="\t", check.names=F)
+rt=as.matrix(rt)
+rownames(rt)=rt[,1]
+exp=rt[,2:ncol(rt)]
+dimnames=list(rownames(exp),colnames(exp))
+data=matrix(as.numeric(as.matrix(exp)),nrow=nrow(exp),dimnames=dimnames)
+data=avereps(data)
+data=data[rowMeans(data)>0,]
+
+
+cluster=read.table(cluFile, header=T, sep="\t", check.names=F, row.names=1)
+
+
+sameSample=intersect(colnames(data), row.names(cluster))
+data=data[,sameSample]
+cluster=cluster[sameSample,]
+
+
+logFCfilter=0
+geneList=list()
+Type=as.vector(cluster)
+design=model.matrix(~0+factor(Type))
+colnames(design)=levels(factor(Type))
+comp=combn(levels(factor(Type)), 2)
+allDiffGenes=c()
+for(i in 1:ncol(comp)){
+  fit=lmFit(data, design)
+  contrast=paste0(comp[2,i], "-", comp[1,i])
+  #print(contrast)
+  cont.matrix=makeContrasts(contrast, levels=design)
+  fit2=contrasts.fit(fit, cont.matrix)
+  fit2=eBayes(fit2)
+  
+
+  allDiff=topTable(fit2,adjust='fdr',number=200000)
+  allDiffOut=rbind(id=colnames(allDiff),allDiff)
+  write.table(allDiffOut, file=paste0(contrast, ".all.txt"), sep="\t", quote=F, col.names=F)
+  
+
+  diffSig=allDiff[with(allDiff, (abs(logFC)>logFCfilter & adj.P.Val < adj.P.Val.Filter )), ]
+  diffSigOut=rbind(id=colnames(diffSig),diffSig)
+  write.table(diffSigOut, file=paste0(contrast, ".diff.txt"), sep="\t", quote=F, col.names=F)
+  geneList[[contrast]]=row.names(diffSig)
+}
+
+
+venn.plot=venn.diagram(geneList,filename=NULL,fill=rainbow(length(geneList)) )
+pdf(file="venn.pdf", width=5, height=5)
+grid.draw(venn.plot)
+dev.off()
+
+
+interGenes=Reduce(intersect,geneList)
+write.table(file="interGene.txt",interGenes,sep="\t",quote=F,col.names=F,row.names=F)
+JJ=read.table("interGene.txt", header=T, sep="\t", check.names=F)
+
+interGeneExp=data[JJ[,1],]
+interGeneExp=rbind(id=colnames(interGeneExp), interGeneExp)
+write.table(interGeneExp, file="interGeneExp.txt", sep="\t", quote=F, col.names=F)
+
+
+
+
+
+
+library("clusterProfiler")
+library("org.Hs.eg.db")
+library("enrichplot")
+library("ggplot2")
+
+pvalueFilter=0.05       
+qvalueFilter=0.05      
+
+
+colorSel="qvalue"
+if(qvalueFilter>0.05){
+  colorSel="pvalue"
+}
+
+setwd()       
+rt=read.table("interGene.txt", header=F, sep="\t", check.names=F)    
+
+
+genes=unique(as.vector(rt[,1]))
+entrezIDs=mget(genes, org.Hs.egSYMBOL2EG, ifnotfound=NA)
+entrezIDs=as.character(entrezIDs)
+gene=entrezIDs[entrezIDs!="NA"]        
+#gene=gsub("c\\(\"(\\d+)\".*", "\\1", gene)
+
+
+kk=enrichGO(gene=gene, OrgDb=org.Hs.eg.db, pvalueCutoff=1, qvalueCutoff=1, ont="all", readable=T)
+GO=as.data.frame(kk)
+GO=GO[(GO$pvalue<pvalueFilter & GO$qvalue<qvalueFilter),]
+
+write.table(GO, file="GO.txt", sep="\t", quote=F, row.names = F)
+
+
+showNum=15
+if(nrow(GO)<30){
+  showNum=nrow(GO)
+}
+
+
+pdf(file="barplot.pdf", width=9, height=10)
+bar=barplot(kk, drop=TRUE, showCategory=showNum, split="ONTOLOGY", color=colorSel) + facet_grid(ONTOLOGY~., scale='free')
+print(bar)
+dev.off()
+
+pdf(file="bubble.pdf", width=9, height=10)
+bub=dotplot(kk, showCategory=showNum, orderBy="GeneRatio", split="ONTOLOGY", color=colorSel) + facet_grid(ONTOLOGY~., scale='free')
+print(bub)
+dev.off()
+
+
+
+
+
+library("clusterProfiler")
+library("org.Hs.eg.db")
+library("enrichplot")
+library("ggplot2")
+
+pvalueFilter=0.05        
+qvalueFilter=0.05        
+
+
+colorSel="qvalue"
+if(qvalueFilter>0.05){
+  colorSel="pvalue"
+}
+
+setwd()            
+rt=read.table("interGene.txt", header=F, sep="\t", check.names=F)     
+
+
+genes=unique(as.vector(rt[,1]))
+entrezIDs=mget(genes, org.Hs.egSYMBOL2EG, ifnotfound=NA)
+entrezIDs=as.character(entrezIDs)
+rt=data.frame(genes, entrezID=entrezIDs)
+gene=entrezIDs[entrezIDs!="NA"]        
+#gene=gsub("c\\(\"(\\d+)\".*", "\\1", gene)
+
+
+kk <- enrichKEGG(gene=gene, organism="hsa", pvalueCutoff=1, qvalueCutoff=1)
+KEGG=as.data.frame(kk)
+KEGG$geneID=as.character(sapply(KEGG$geneID,function(x)paste(rt$genes[match(strsplit(x,"/")[[1]],as.character(rt$entrezID))],collapse="/")))
+KEGG=KEGG[(KEGG$pvalue<pvalueFilter & KEGG$qvalue<qvalueFilter),]
+
+write.table(KEGG, file="KEGG.txt", sep="\t", quote=F, row.names = F)
+
+
+showNum=30
+if(nrow(KEGG)<showNum){
+  showNum=nrow(KEGG)
+}
+
+
+pdf(file="barplot.pdf", width=9, height=7)
+barplot(kk, drop=TRUE, showCategory=showNum, color=colorSel)
+dev.off()
+
+
+pdf(file="bubble.pdf", width = 9, height = 7)
+dotplot(kk, showCategory=showNum, orderBy="GeneRatio", color=colorSel)
+dev.off()
+
+
+library(limma)
+library(survival)
+expFile="interGeneExp.txt"     
+cliFile="time.txt"           
+setwd()    
+
+
+rt=read.table(expFile, header=T, sep="\t", check.names=F)
+rt=as.matrix(rt)
+rownames(rt)=rt[,1]
+exp=rt[,2:ncol(rt)]
+dimnames=list(rownames(exp), colnames(exp))
+data=matrix(as.numeric(as.matrix(exp)), nrow=nrow(exp), dimnames=dimnames)
+data=avereps(data)
+data=data[rowMeans(data)>0,]
+data1=t(data)
+rownames(data1)=gsub("(.*?)\\_(.*?)", "\\2", rownames(data1))
+
+
+cli=read.table(cliFile, header=T, sep="\t", check.names=F, row.names=1)     
+#cli$futime=cli$futime/365
+
+
+sameSample=intersect(row.names(data1), row.names(cli))
+data1=data1[sameSample,,drop=F]
+cli=cli[sameSample,,drop=F]
+rt=cbind(cli, data1)
+
+
+outTab=data.frame()
+sigGenes=c()
+for(i in colnames(rt[,3:ncol(rt)])){
+ 
+  cox <- coxph(Surv(futime, fustat) ~ rt[,i], data = rt)
+  coxSummary = summary(cox)
+  coxP=coxSummary$coefficients[,"Pr(>|z|)"]
+  if(coxP<0.05){
+    sigGenes=c(sigGenes,i)
+    outTab=rbind(outTab,
+                 cbind(id=i,
+                       HR=coxSummary$conf.int[,"exp(coef)"],
+                       HR.95L=coxSummary$conf.int[,"lower .95"],
+                       HR.95H=coxSummary$conf.int[,"upper .95"],
+                       pvalue=coxSummary$coefficients[,"Pr(>|z|)"])
+    )
+  }
+}
+
+
+write.table(outTab,file="uniCox.txt",sep="\t",row.names=F,quote=F)
+
+
+sigGeneExp=data[sigGenes,]
+sigGeneExp=rbind(id=colnames(sigGeneExp), sigGeneExp)
+write.table(sigGeneExp, file="uniSigGeneExp.txt", sep="\t", quote=F, col.names=F)
+
+
+
+
+
+
+
+
+library(limma)
+library(ConsensusClusterPlus)
+expFile="uniSigGeneExp.txt"        
+setwd(workDir)      
+
+
+rt=read.table(expFile, header=T, sep="\t", check.names=F)
+rt=as.matrix(rt)
+rownames(rt)=rt[,1]
+exp=rt[,2:ncol(rt)]
+dimnames=list(rownames(exp), colnames(exp))
+data=matrix(as.numeric(as.matrix(exp)), nrow=nrow(exp), dimnames=dimnames)
+data=avereps(data)
+data=data[rowMeans(data)>0,]
+
+
+maxK=9
+results=ConsensusClusterPlus(data,
+                             maxK=maxK,
+                             reps=50,
+                             pItem=0.8,
+                             pFeature=1,
+                             title=workDir,
+                             clusterAlg="km",
+                             distance="euclidean",
+                             seed=123456,
+                             plot="png")
+
+
+clusterNum=3       
+cluster=results[[clusterNum]][["consensusClass"]]
+cluster=as.data.frame(cluster)
+colnames(cluster)=c("geneCluster")
+letter=c("A","B","C","D","E","F","G")
+uniqClu=levels(factor(cluster$geneCluster))
+cluster$geneCluster=letter[match(cluster$geneCluster, uniqClu)]
+clusterOut=rbind(ID=colnames(cluster), cluster)
+write.table(clusterOut, file="geneCluster.txt", sep="\t", quote=F, col.names=F)
+
+
+
+
+library(survival)
+library(survminer)
+clusterFile="geneCluster.txt"     
+cliFile="time.txt"              
+setwd()      
+
+
+cluster=read.table(clusterFile, header=T, sep="\t", check.names=F, row.names=1)
+rownames(cluster)=gsub("(.*?)\\_(.*?)", "\\2", rownames(cluster))
+cli=read.table(cliFile, header=T, sep="\t", check.names=F, row.names=1)
+colnames(cli)=c("futime", "fustat")
+#cli$futime=cli$futime/365
+
+
+sameSample=intersect(row.names(cluster), row.names(cli))
+rt=cbind(cli[sameSample,,drop=F], cluster[sameSample,,drop=F])
+
+
+length=length(levels(factor(rt$geneCluster)))
+diff=survdiff(Surv(futime, fustat) ~ geneCluster, data = rt)
+pValue=1-pchisq(diff$chisq, df=length-1)
+if(pValue<0.001){
+  pValue="p<0.001"
+}else{
+  pValue=paste0("p=",sprintf("%.03f",pValue))
+}
+fit <- survfit(Surv(futime, fustat) ~ geneCluster, data = rt)
+#print(surv_median(fit))
+
+
+bioCol=c("#0066FF","#FF9900","#FF0000","#6E568C","#7CC767","#223D6C","#D20A13","#FFD121","#088247","#11AA4D")
+bioCol=bioCol[1:length(levels(factor(rt[,"geneCluster"])))]
+surPlot=ggsurvplot(fit, 
+                   data=rt,
+                   conf.int=F,
+                   pval=pValue,
+                   pval.size=6,
+                   legend.labs=levels(factor(rt[,"geneCluster"])),
+                   legend.title="geneCluster",
+                   legend = c(0.8, 0.8),
+                   font.legend=10,
+                   xlab="Time(years)",
+                   break.time.by = 1,
+                   palette = bioCol,
+                   surv.median.line = "hv",
+                   risk.table=T,
+                   cumevents=F,
+                   risk.table.height=.25)
+pdf(file="survival.pdf", onefile = FALSE, width=7, height=5.5)
+print(surPlot)
+dev.off()
+
+
+
+
+
+library(pheatmap)       
+expFile="uniSigGeneExp.txt"       
+geneCluFile="geneCluster.txt"     
+m6aCluFile="m6aCluster.txt"       
+cliFile="clinical.txt"       
+setwd()   
+
+
+exp=read.table(expFile, header=T, sep="\t", check.names=F, row.names=1)
+m6aClu=read.table(m6aCluFile, header=T, sep="\t", check.names=F, row.names=1)
+geneClu=read.table(geneCluFile, header=T, sep="\t", check.names=F, row.names=1)
+
+
+exp=as.data.frame(t(exp))
+sameSample=intersect(row.names(exp), row.names(m6aClu))
+exp=exp[sameSample,,drop=F]
+expData=cbind(exp, geneCluster=geneClu[sameSample,], m6Acluster=m6aClu[sameSample,])
+Project=gsub("(.*?)\\_.*", "\\1", rownames(expData))
+rownames(expData)=gsub("(.*?)\\_(.*?)", "\\2", rownames(expData))
+expData=cbind(expData, Project)
+
+
+cli=read.table(cliFile, header=T, sep="\t", check.names=F, row.names=1)
+sameSample=intersect(row.names(expData), row.names(cli))
+expData=expData[sameSample,,drop=F]
+cli=cli[sameSample,,drop=F]
+data=cbind(expData, cli)
+
+data=data[order(data$geneCluster),]
+Type=data[,((ncol(data)-2-ncol(cli)):ncol(data))]
+data=t(data[,1:(ncol(expData)-3)])
+
+
+bioCol=c("#0066FF","#FF9900","#FF0000","#6E568C","#7CC767","#223D6C","#D20A13","#FFD121","#088247","#11AA4D")
+ann_colors=list()
+m6Acol=bioCol[1:length(levels(factor(Type$m6Acluster)))]
+names(m6Acol)=levels(factor(Type$m6Acluster))
+ann_colors[["m6Acluster"]]=m6Acol
+GENEcol=bioCol[1:length(levels(factor(Type$geneCluster)))]
+names(GENEcol)=levels(factor(Type$geneCluster))
+ann_colors[["geneCluster"]]=GENEcol
+
+
+pdf("heatmap.pdf", height=6, width=8)
+pheatmap(data,
+         annotation=Type,
+         annotation_colors = ann_colors,
+         color = colorRampPalette(c(rep("blue",5), "white", rep("red",5)))(50),
+         cluster_cols =F,
+         cluster_rows =F,
+         scale="row",
+         show_colnames=F,
+         show_rownames=F,
+         fontsize=6,
+         fontsize_row=2,
+         fontsize_col=6)
+dev.off()
+
+
+
+
+
+library(limma)
+library(reshape2)
+library(ggpubr)
+expFile="m6aGeneExp.txt"         
+geneCluFile="geneCluster.txt"     
+setwd()     
+
+
+rt=read.table(expFile, header=T, sep="\t", check.names=F)
+rt=as.matrix(rt)
+rownames(rt)=rt[,1]
+exp=rt[,2:ncol(rt)]
+dimnames=list(rownames(exp),colnames(exp))
+data=matrix(as.numeric(as.matrix(exp)),nrow=nrow(exp),dimnames=dimnames)
+data=avereps(data)
+data=t(data)
+
+
+geneClu=read.table(geneCluFile, header=T, sep="\t", check.names=F, row.names=1)
+
+
+sameSample=intersect(row.names(data), row.names(geneClu))
+expClu=cbind(data[sameSample,,drop=F], geneClu[sameSample,,drop=F])
+
+
+data=melt(expClu, id.vars=c("geneCluster"))
+colnames(data)=c("geneCluster", "Gene", "Expression")
+
+
+bioCol=c("#0066FF","#FF9900","#FF0000","#6E568C","#7CC767","#223D6C","#D20A13","#FFD121","#088247","#11AA4D")
+bioCol=bioCol[1:length(levels(factor(data[,"geneCluster"])))]
+
+
+p=ggboxplot(data, x="Gene", y="Expression", color = "geneCluster", 
+            ylab="Gene expression",
+            xlab="",
+            legend.title="geneCluster",
+            palette = bioCol,
+            width=1)
+p=p+rotate_x_text(60)
+p1=p+stat_compare_means(aes(group=geneCluster),
+                        symnum.args=list(cutpoints = c(0, 0.001, 0.01, 0.05, 1), symbols = c("***", "**", "*", " ")),
+                        label = "p.signif")
+
+
+pdf(file="boxplot.pdf", width=30, height=5)
+print(p1)
+dev.off()
+
+
+expFile="merge exp.txt"     
+setwd()     
+
+
+data=read.table(expFile, header=T, sep="\t", check.names=F, row.names=1)
+data=t(data)
+
+
+pca=prcomp(data, scale=TRUE)
+value=predict(pca)
+m6Ascore=value[,1]+value[,2]
+m6Ascore=as.data.frame(m6Ascore)
+scoreOut=rbind(id=colnames(m6Ascore), m6Ascore)
+write.table(scoreOut, file="merge score.txt", sep="\t", quote=F, col.names=F)
+
+
+rt=read.table("merge.txt", header=T, sep="\t", check.names=F)
+rt=as.matrix(rt)
+rownames(rt)=rt[,1]
+exp=rt[,2:ncol(rt)]
+dimnames=list(rownames(exp), colnames(exp))
+data=matrix(as.numeric(as.matrix(exp)), nrow=nrow(exp), dimnames=dimnames)
+data=avereps(data)
+data=data[rowMeans(data)>0,]
+
+
+gene=read.table("gene.txt", header=T, sep="\t", check.names=F)
+sameGene=intersect(as.vector(gene[,1]), row.names(data))
+data=data[sameGene,]
+write.table(data, file="merge exp.txt", sep="\t", quote=F, col.names=T)
+
+
+
+
+
+
+
+library(survival)
+library(survminer)
+scoreFile="GEO score.txt"    
+cliFile="time.txt"         
+setwd()    
+
+score=read.table(scoreFile, header=T, sep="\t", check.names=F, row.names=1)
+sampleType=gsub("(.*?)\\_.*", "\\1", row.names(score))
+score=cbind(score, sampleType)
+rownames(score)=gsub("(.*?)\\_(.*?)", "\\2", rownames(score))
+cli=read.table(cliFile, header=T, sep="\t", check.names=F, row.names=1)
+colnames(cli)=c("futime", "fustat")
+#cli$futime=cli$futime/365
+
+
+sameSample=intersect(row.names(score), row.names(cli))
+data=cbind(cli[sameSample,], score[sameSample,])
+
+
+res.cut=surv_cutpoint(data, time="futime", event="fustat", variables=c("m6Ascore"))
+cutoff=as.numeric(res.cut$cutpoint[1])
+print(cutoff)
+Type=ifelse(data[,"m6Ascore"]<=cutoff, "Low", "High")
+data$group=Type
+outTab=rbind(id=colnames(data), data)
+write.table(outTab, file="ICI免疫治疗score.group.txt", sep="\t", quote=F, col.names=F)
+
+data=read.table("ICI免疫治疗score.group.txt", header=T, sep="\t", check.names=F, row.names=1)
+
+data$group=factor(data$group, levels=c("Low", "High"))
+diff=survdiff(Surv(futime, fustat) ~ group, data = data)
+length=length(levels(factor(data[,"group"])))
+pValue=1-pchisq(diff$chisq, df=length-1)
+if(pValue<0.001){
+  pValue="p<0.001"
+}else{
+  pValue=paste0("p=",sprintf("%.03f",pValue))
+}
+fit <- survfit(Surv(futime, fustat) ~ group, data = data)
+#print(surv_median(fit))
+
+bioCol=c("#0066FF","#FF0000","#6E568C","#7CC767","#223D6C","#D20A13","#FFD121","#088247","#11AA4D")
+bioCol=bioCol[1:length]
+surPlot=ggsurvplot(fit, 
+                   data=data,
+                   conf.int=F,
+                   pval=pValue,
+                   pval.size=6,
+                   legend.title="m6Ascore",
+                   legend.labs=levels(factor(data[,"group"])),
+                   legend = c(0.8, 0.8),
+                   font.legend=12,
+                   xlab="Time(years)",
+                   break.time.by = 1,
+                   palette = bioCol,
+                   surv.median.line = "hv",
+                   risk.table=T,
+                   cumevents=F,
+                   risk.table.height=.25)
+
+
+pdf(file="GEO survival.pdf", onefile = FALSE, width=7, height=5.5)
+print(surPlot)
+dev.off()
+
+
+
+
+library(corrplot)
+scoreFile="merge score.txt"        
+immFile="ssGSEA.result.txt"     
+setwd()     
+
+
+score=read.table(scoreFile, header=T, sep="\t", check.names=F, row.names=1)
+
+
+immune=read.table(immFile, header=T, sep="\t", check.names=F, row.names=1)
+immune=t(immune)
+
+
+sameSample=intersect(row.names(score), row.names(immune))
+data=cbind(score[sameSample,,drop=F], immune[sameSample,,drop=F])
+
+
+M=cor(data)
+res1=cor.mtest(data, conf.level = 0.95)
+
+
+pdf(file="cor.pdf", width=8, height=8)
+corrplot(M,
+         order="original",
+         method = "circle",
+         type = "upper",
+         tl.cex=0.8, pch=T,
+         p.mat = res1$p,
+         insig = "label_sig",
+         pch.cex = 1.6,
+         sig.level=0.05,
+         number.cex = 1,
+         col=colorRampPalette(c("blue", "white", "red"))(50),
+         tl.col="black")
+dev.off()
+
+
+
+
+
+library(limma)
+library(ggpubr)
+m6aCluFile="m6aCluster.txt"       
+geneCluFile="geneCluster.txt"      
+scoreFile="merge score.txt"          
+setwd()     
+
+
+m6aClu=read.table(m6aCluFile, header=T, sep="\t", check.names=F, row.names=1)
+geneClu=read.table(geneCluFile, header=T, sep="\t", check.names=F, row.names=1)
+score=read.table(scoreFile, header=T, sep="\t", check.names=F, row.names=1)
+
+
+twoCluster=cbind(m6aClu, geneClu)
+sameSample=intersect(row.names(twoCluster), row.names(score))
+data=cbind(score[sameSample,,drop=F], twoCluster[sameSample,,drop=F])
+
+
+data$m6Acluster=factor(data$m6Acluster, levels=levels(factor(data$m6Acluster)))
+group=levels(factor(data$m6Acluster))
+comp=combn(group, 2)
+my_comparisons=list()
+for(i in 1:ncol(comp)){my_comparisons[[i]]<-comp[,i]}
+
+
+bioCol=c("#0066FF","#FF9900","#FF0000","#6E568C","#7CC767","#223D6C","#D20A13","#FFD121","#088247","#11AA4D")
+bioCol=bioCol[1:length(levels(factor(data$m6Acluster)))]
+
+
+boxplot=ggboxplot(data, x="m6Acluster", y="m6Ascore", color="m6Acluster",
+                  xlab="m6Acluster",
+                  ylab="m6Ascore",
+                  legend.title="m6Acluster",
+                  palette=bioCol,
+                  add = "jitter")+ 
+  stat_compare_means(comparisons = my_comparisons)
+
+
+pdf(file="cluster.pdf", width=5, height=4.5)
+print(boxplot)
+dev.off()
+
+
+
+data$geneCluster=factor(data$geneCluster, levels=levels(factor(data$geneCluster)))
+group=levels(factor(data$geneCluster))
+comp=combn(group, 2)
+my_comparisons=list()
+for(i in 1:ncol(comp)){my_comparisons[[i]]<-comp[,i]}
+
+
+bioCol=c("#0066FF","#FF9900","#FF0000","#6E568C","#7CC767","#223D6C","#D20A13","#FFD121","#088247","#11AA4D")
+bioCol=bioCol[1:length(levels(factor(data$geneCluster)))]
+
+
+boxplot=ggboxplot(data, x="geneCluster", y="m6Ascore", color="geneCluster",
+                  xlab="geneCluster",
+                  ylab="m6Ascore",
+                  legend.title="geneCluster",
+                  palette=bioCol,
+                  add = "jitter")+ 
+  stat_compare_means(comparisons = my_comparisons)
+
+
+pdf(file="geneCluster.pdf", width=5, height=4.5)
+print(boxplot)
+dev.off()
+
+
+
+library(ggpubr)
+library(reshape2)
+tmbFile="TMB.txt"     
+scoreFile="m6Ascore.group.txt"     
+cluFile="geneCluster.txt"    
+setwd()    
+
+
+tmb=read.table(tmbFile, header=T, sep="\t", check.names=F, row.names=1)        
+score=read.table(scoreFile, header=T, sep="\t", check.names=F, row.names=1)    
+clu=read.table(cluFile, header=T, sep="\t", check.names=F, row.names=1)        
+
+
+tmb=as.matrix(tmb)
+tmb[tmb>quantile(tmb,0.975)]=quantile(tmb,0.975)
+sameSample=intersect(row.names(tmb), row.names(score))
+tmb=tmb[sameSample,,drop=F]
+score=score[sameSample,,drop=F]
+rownames(clu)=gsub("(.*?)\\_(.*?)", "\\2", rownames(clu))
+clu=clu[sameSample,,drop=F]
+data=cbind(score, tmb, clu)
+data=data[,c("m6Ascore", "group", "geneCluster", "TMB")]
+
+
+data$group=factor(data$group, levels=c("Low", "High"))
+group=levels(factor(data$group))
+comp=combn(group, 2)
+my_comparisons=list()
+for(i in 1:ncol(comp)){my_comparisons[[i]]<-comp[,i]}
+
+
+bioCol=c("#0066FF","#FF0000","#6E568C","#7CC767","#223D6C","#D20A13","#FFD121","#088247","#11AA4D")
+bioCol=bioCol[1:length(group)]
+
+
+boxplot=ggboxplot(data, x="group", y="TMB", fill="group",
+                  xlab="",
+                  ylab="Tumor Burden Mutation",
+                  legend.title="m6aScore",
+                  palette = bioCol )+ 
+  stat_compare_means(comparisons = my_comparisons)
+pdf(file="boxplot.pdf",width=5,height=4.5)
+print(boxplot)
+dev.off()
+
+
+length=length(levels(factor(data$geneCluster)))
+bioCol=c("#0066FF","#FF9900","#FF0000","#6E568C","#7CC767","#223D6C","#D20A13","#FFD121","#088247","#11AA4D")
+p1=ggplot(data, aes(m6Ascore, TMB)) + 
+  xlab("m6Ascore")+ylab("Tumor Burden Mutation")+
+  geom_point(aes(colour=geneCluster))+
+  scale_color_manual(values=bioCol[1:length])+ 
+  geom_smooth(method="lm",formula = y ~ x) + theme_bw()+
+  stat_cor(method = 'spearman', aes(x =m6Ascore, y =TMB))
+
+pdf(file="cor.pdf", width=6, height=4.5)
+print(p1)
+dev.off()
+
+
+
+
+
+library(survival)
+library(survminer)
+tmbFile="TMB.txt"                 
+scoreFile="m6Ascore.group.txt"    
+setwd()     
+
+
+score=read.table(scoreFile, header=T, sep="\t", check.names=F, row.names=1)   
+tmb=read.table(tmbFile, header=T, sep="\t", check.names=F, row.names=1)      
+
+
+sameSample=intersect(row.names(tmb), row.names(score))
+tmb=tmb[sameSample,,drop=F]
+score=score[sameSample,,drop=F]
+data=cbind(score, tmb)
+
+
+res.cut=surv_cutpoint(data, time = "futime", event = "fustat", variables =c("TMB"))
+cutoff=as.numeric(res.cut$cutpoint[1])
+tmbType=ifelse(data[,"TMB"]<=cutoff, "L-TMB", "H-TMB")
+scoreType=ifelse(data$group=="Low", "L-m6Ascore", "H-m6Ascore")
+mergeType=paste0(tmbType, "+", scoreType)
+
+
+bioSurvival=function(surData=null, outFile=null){
+  diff=survdiff(Surv(futime, fustat) ~ group, data=surData)
+  length=length(levels(factor(surData[,"group"])))
+  pValue=1-pchisq(diff$chisq, df=length-1)
+  if(pValue<0.001){
+    pValue="p<0.001"
+  }else{
+    pValue=paste0("p=",sprintf("%.03f",pValue))
+  }
+  fit <- survfit(Surv(futime, fustat) ~ group, data = surData)
+  #print(surv_median(fit))
+  
+ 
+  width=6.5
+  height=5.5
+  if(length(levels(factor(surData[,"group"])))>2){
+    width=8
+    height=6.5
+  }
+  bioCol=c("#FF0000","#0066FF","#6E568C","#7CC767","#223D6C","#D20A13","#FFD121","#088247","#11AA4D")
+  bioCol=bioCol[1:length]
+  surPlot=ggsurvplot(fit, 
+                     data=surData,
+                     conf.int=F,
+                     pval=pValue,
+                     pval.size=6,
+                     legend.title="",
+                     legend.labs=levels(factor(surData[,"group"])),
+                     font.legend=10,
+                     legend = c(0.8, 0.8),
+                     xlab="Time(years)",
+                     break.time.by = 1,
+                     palette = bioCol,
+                     surv.median.line = "hv",
+                     risk.table=T,
+                     cumevents=F,
+                     risk.table.height=.25)
+ 
+  pdf(file=outFile, onefile = FALSE, width=width, height=height)
+  print(surPlot)
+  dev.off()
+}
+
+
+data$group=tmbType
+bioSurvival(surData=data, outFile="TMB.survival.pdf")
+
+
+data$group=mergeType
+bioSurvival(surData=data, outFile="TMB-score.survival.pdf")
+
+
+
+
+
+
+library(maftools)      
+setwd()      
+
+
+score=read.table("m6Ascore.group.txt", header=T, sep="\t", check.names=F)
+outTab=score[,c(1, ncol(score))]
+colnames(outTab)=c("Tumor_Sample_Barcode", "m6Ascore")
+write.table(outTab, file="ann.txt", sep="\t", quote=F, row.names=F)
+
+
+geneNum=20
+geneMut=read.table("geneMut.txt", header=T, sep="\t", check.names=F, row.names=1)
+gene=row.names(geneMut)[1:geneNum]
+
+
+ann_colors=list()
+col=c("#0066FF","#FF0000")
+names(col)=c("Low", "High")
+ann_colors[["m6Ascore"]]=col
+
+
+pdf(file="low.pdf", width=6, height=6)
+maf=read.maf(maf="low.maf", clinicalData="ann.txt")
+oncoplot(maf=maf, clinicalFeatures="m6Ascore", genes=gene, annotationColor=ann_colors, keepGeneOrder=T)
+dev.off()
+
+
+pdf(file="high.pdf", width=6, height=6)
+maf=read.maf(maf="high.maf", clinicalData="ann.txt")
+oncoplot(maf=maf, clinicalFeatures="m6Ascore", genes=gene, annotationColor=ann_colors, keepGeneOrder=T)
+dev.off()
+
+
+
+
+
+
+library(limma)
+library(ggpubr)
+gene="PDCD1LG2"           
+showName="PDCD1LG2"        
+expFile="merge.txt"                
+scoreFile="m6Ascore.group.txt"    
+setwd()     
+
+
+
+rt=read.table(expFile, header=T, sep="\t", check.names=F)
+rt=as.matrix(rt)
+rownames(rt)=rt[,1]
+exp=rt[,2:ncol(rt)]
+dimnames=list(rownames(exp),colnames(exp))
+data=matrix(as.numeric(as.matrix(exp)),nrow=nrow(exp),dimnames=dimnames)
+data=avereps(data)
+colnames(data)=gsub("(.*?)\\_(.*?)", "\\2", colnames(data))
+
+
+data=rbind(data, gene=data[gene,])
+exp=t(data[c("gene",gene),])
+exp=avereps(exp)
+
+
+score=read.table(scoreFile, header=T, sep="\t", check.names=F, row.names=1)
+
+
+sameSample=intersect(row.names(exp), row.names(score))
+exp=exp[sameSample,]
+exp[exp>quantile(exp,0.975)]=quantile(exp,0.975)
+score=score[sameSample,]
+data=cbind(as.data.frame(exp), as.data.frame(score))
+
+
+data$group=factor(data$group, levels=c("Low", "High"))
+group=levels(factor(data$group))
+comp=combn(group,2)
+my_comparisons=list()
+for(i in 1:ncol(comp)){my_comparisons[[i]]<-comp[,i]}
+
+
+boxplot=ggboxplot(data, x="group", y="gene", fill="group",
+                  xlab="m6Ascore",
+                  ylab=paste(showName, "expression"),
+                  legend.title="m6Ascore",
+                  palette=c("#0066FF","#FF0000"))+ 
+  stat_compare_means(comparisons = my_comparisons)
+
+
+pdf(file=paste0(gene, ".pdf"), width=5, height=4.5)
+print(boxplot)
+dev.off()
+
+
+
+
+
+library(ggpubr)                   
+tciaFile="TCIA.txt"              
+scoreFile="m6Ascore.group.txt"    
+setwd()     
+
+
+ips=read.table(tciaFile, header=T, sep="\t", check.names=F, row.names=1)
+
+
+score=read.table(scoreFile, header=T, sep="\t", check.names=F, row.names=1)
+
+
+sameSample=intersect(row.names(ips), row.names(score))
+ips=ips[sameSample, , drop=F]
+score=score[sameSample, "group", drop=F]
+data=cbind(ips, score)
+
+
+data$group=factor(data$group, levels=c("Low", "High"))
+group=levels(factor(data$group))
+comp=combn(group, 2)
+my_comparisons=list()
+for(i in 1:ncol(comp)){my_comparisons[[i]]<-comp[,i]}
+
+
+for(i in colnames(data)[1:(ncol(data)-1)]){
+  rt=data[,c(i, "group")]
+  colnames(rt)=c("IPS", "group")
+  gg1=ggviolin(rt, x="group", y="IPS", fill = "group", 
+               xlab="m6Ascore", ylab=i,
+               legend.title="m6Ascore",
+               palette=c("#0066FF", "#FF0000"),
+               add = "boxplot", add.params = list(fill="white"))+ 
+    stat_compare_means(comparisons = my_comparisons)
+  #stat_compare_means(comparisons = my_comparisons,symnum.args=list(cutpoints = c(0, 0.001, 0.01, 0.05, 1), symbols = c("***", "**", "*", "ns")),label = "p.signif")
+  
+  pdf(file=paste0(i, ".pdf"), width=6, height=5)
+  print(gg1)
+  dev.off()
+}
+
+
+
+
+
+
+library(plyr)
+library(ggplot2)
+library(ggpubr)
+scoreFile="免疫治疗score.group.txt"   
+cliFile="clinic.txt"             
+trait="MSI"                       
+setwd()    
+
+
+score=read.table(scoreFile, header=T, sep="\t", check.names=F, row.names=1)
+cli=read.table(cliFile, header=T, sep="\t", check.names=F, row.names=1)
+sameSample=intersect(row.names(score), row.names(cli))
+rt=cbind(score[sameSample,,drop=F], cli[sameSample,,drop=F])
+rt$MSI=factor(rt$MSI, levels=c("CR/PR", "SD/PD"))
+rt$group=factor(rt$group, levels=c("Low", "High"))
+bioCol=c("#0066FF","#FF0000","#FF9900","#6E568C","#7CC767","#223D6C","#D20A13","#FFD121","#088247","#11AA4D")
+bioCol=bioCol[1:length(unique(rt[,trait]))]
+
+
+rt1=rt[,c(trait, "group")]
+colnames(rt1)=c("trait", "group")
+df=as.data.frame(table(rt1))
+
+df=ddply(df, .(group), transform, percent = Freq/sum(Freq) * 100)
+
+df=ddply(df, .(group), transform, pos = (cumsum(Freq) - 0.5 * Freq))
+df$label=paste0(sprintf("%.0f", df$percent), "%")
+
+p=ggplot(df, aes(x = factor(group), y = percent, fill = trait)) +
+  geom_bar(position = position_stack(), stat = "identity", width = .7) +
+  scale_fill_manual(values=bioCol)+
+  xlab("m6Ascore")+ ylab("Percent weight")+  guides(fill=guide_legend(title=trait))+
+  geom_text(aes(label = label), position = position_stack(vjust = 0.5), size = 3) +
+  #coord_flip()+
+  theme_bw()
+pdf(file="ICIbarplot.pdf", width=4, height=5)
+print(p)
+dev.off()
+
+
+rt2=rt[,c(trait, "m6Ascore")]
+colnames(rt2)=c("trait", "m6Ascore")
+type=levels(factor(rt2[,"trait"]))
+comp=combn(type, 2)
+my_comparisons=list()
+for(i in 1:ncol(comp)){my_comparisons[[i]]<-comp[,i]}
+
+boxplot=ggboxplot(rt2, x="trait", y="m6Ascore", fill="trait",
+                  xlab="",
+                  ylab="m6Ascore",
+                  legend.title=trait,
+                  palette=bioCol
+)+ 
+  stat_compare_means(comparisons=my_comparisons)
+pdf(file="ICIboxplot.pdf",width=4,height=4.5)
+print(boxplot)
+dev.off()
+
+
+
+
+
+library(plyr)
+library(ggplot2)
+library(ggpubr)
+scoreFile="exp.txt"   
+cliFile="clinic.txt"               
+trait="MSI"                      
+setwd()    
+
+
+score=read.table(scoreFile, header=T, sep="\t", check.names=F, row.names=1)
+cli=read.table(cliFile, header=T, sep="\t", check.names=F, row.names=1)
+sameSample=intersect(row.names(score), row.names(cli))
+rt=cbind(score[sameSample,,drop=F], cli[sameSample,,drop=F])
+rt$MSI=factor(rt$MSI, levels=c("CR/PR", "SD/PD"))
+bioCol=c("#0066FF","#FF0000","#FF9900","#6E568C","#7CC767","#223D6C","#D20A13","#FFD121","#088247","#11AA4D")
+bioCol=bioCol[1:length(unique(rt[,trait]))]
+
+
+
+rt2=rt[,c(trait, "FBLN2")]
+colnames(rt2)=c("trait", "FBLN2")
+type=levels(factor(rt2[,"trait"]))
+comp=combn(type, 2)
+my_comparisons=list()
+for(i in 1:ncol(comp)){my_comparisons[[i]]<-comp[,i]}
+
+boxplot=ggboxplot(rt2, x="trait", y="FBLN2", fill="trait",
+                  xlab="",
+                  ylab="FBLN2",
+                  legend.title=trait,
+                  palette=bioCol
+)+ 
+  stat_compare_means(comparisons=my_comparisons)
+pdf(file="boxplot.pdf",width=4,height=4.5)
+print(boxplot)
+dev.off()
+
+
+
+
+
+install.packages("randomForest")
+
+
+
+library(randomForest)
+set.seed(123456)
+
+inputFile="蛋白表达.txt" 
+setwd()     
+
+
+data=read.table(inputFile, header=T, sep="\t", check.names=F, row.names=1)
+data=t(data)
+group=gsub("(.*)\\_(.*)", "\\2", row.names(data))
+
+
+rf=randomForest(as.factor(group)~., data=data, ntree=500)
+pdf(file="forest.pdf", width=6, height=6)
+plot(rf, main="Random forest", lwd=2)
+dev.off()
+
+
+optionTrees=which.min(rf$err.rate[,1])
+optionTrees
+rf2=randomForest(as.factor(group)~., data=data, ntree=optionTrees)
+
+
+importance=importance(x=rf2)
+
+
+pdf(file="geneImportance.pdf", width=6.2, height=5.8)
+varImpPlot(rf2, main="")
+dev.off()
+
+
+rfGenes=importance[order(importance[,"MeanDecreaseGini"], decreasing = TRUE),]
+rfGenes=names(rfGenes[rfGenes>2])     
+#rfGenes=names(rfGenes[1:30])      
+write.table(rfGenes, file="rfGenes.txt", sep="\t", quote=F, col.names=F, row.names=F)
+
+
+sigExp=t(data[,rfGenes])
+sigExpOut=rbind(ID=colnames(sigExp),sigExp)
+write.table(sigExpOut, file="rfGeneExp.txt", sep="\t", quote=F, col.names=F)
+
+
+
+
+
+library(limma)
+library(pheatmap)
+
+inputFile="rfGeneExp.txt"     
+setwd()    
+
+
+rt=read.table(inputFile, header=T, sep="\t", check.names=F)
+rt=as.matrix(rt)
+rownames(rt)=rt[,1]
+exp=rt[,2:ncol(rt)]
+dimnames=list(rownames(exp),colnames(exp))
+data=matrix(as.numeric(as.matrix(exp)),nrow=nrow(exp),dimnames=dimnames)
+data=avereps(data)
+
+
+Type=gsub("(.*)\\_(.*)", "\\2", colnames(data))
+names(Type)=colnames(data)
+Type=as.data.frame(Type)
+pdf(file="heatmap.pdf", width=8, height=6)
+pheatmap(data, 
+         annotation=Type, 
+         color = colorRampPalette(c("blue", "white", "red"))(50),
+         cluster_cols =T,
+         show_colnames = F,
+         scale="row",
+         fontsize = 8,
+         fontsize_row=7,
+         fontsize_col=8)
+dev.off()
+
+
+
+
+
+library(limma)             
+expFile="rfGeneExp.txt"  
+diffFile="diff.txt"         
+setwd()    
+
+
+rt=read.table(expFile, header=T, sep="\t", check.names=F)
+rt=as.matrix(rt)
+rownames(rt)=rt[,1]
+exp=rt[,2:ncol(rt)]
+dimnames=list(rownames(exp),colnames(exp))
+data=matrix(as.numeric(as.matrix(exp)),nrow=nrow(exp),dimnames=dimnames)
+data=avereps(data)
+
+
+diffRT=read.table(diffFile, header=T, sep="\t", check.names=F, row.names=1)
+diffRT=diffRT[row.names(data),]
+
+
+dataUp=data
+dataDown=data[diffRT[,"logFC"]<0,]
+dataUp2=t(apply(dataUp,1,function(x)ifelse(x>median(x),1,0)))
+dataDown2=t(apply(dataDown,1,function(x)ifelse(x>median(x),0,1)))
+
+
+outTab=dataUp2
+outTab=rbind(id=colnames(outTab), outTab)
+write.table(outTab, file="geneScore.txt", sep="\t", quote=F, col.names=F)
+
+
+
+
+
+
+
+library(neuralnet)
+library(NeuralNetTools)
+set.seed(12345678)
+
+inputFile="geneScore.txt"     
+setwd()    
+
+
+data=read.table(inputFile, header=T, sep="\t", check.names=F, row.names=1)
+data=as.data.frame(t(data))
+
+
+group=gsub("(.*)\\_(.*)", "\\2", row.names(data))
+data$con=ifelse(group=="Low", 1, 0)
+data$treat=ifelse(group=="High", 1, 0)
+
+
+fit=neuralnet(con+treat~., data, hidden=5)
+fit$result.matrix
+fit$weight
+#plot(fit)
+
+pdf(file="neuralnet.pdf", width=9, height=7)
+plotnet(fit)
+dev.off()
+
+
+net.predict=compute(fit, data)$net.result
+net.prediction=c("con", "treat")[apply(net.predict, 1, which.max)]
+predict.table=table(group, net.prediction)
+predict.table
+conAccuracy=predict.table[1,1]/(predict.table[1,1]+predict.table[1,2])
+treatAccuracy=predict.table[2,2]/(predict.table[2,1]+predict.table[2,2])
+paste0("Con accuracy: ", sprintf("%.3f", conAccuracy))
+paste0("Treat accuracy: ", sprintf("%.3f", treatAccuracy))
+
+
+colnames(net.predict)=c("con", "treat")
+outTab=rbind(id=colnames(net.predict), net.predict)
+write.table(outTab, file="neural.predict.txt", sep="\t", quote=F, col.names=F)
+
+
+
+
+
+
+library(pROC)                    
+inputFile="neural.predict.txt"      
+setwd()
+
+
+rt=read.table(inputFile, header=T, sep="\t", check.names=F, row.names=1)
+y=gsub("(.*)\\_(.*)", "\\2", row.names(rt))
+y=ifelse(y=="Low", 0, 1)
+
+
+roc1=roc(y, as.numeric(rt[,2]))
+ci1=ci.auc(roc1, method="bootstrap")
+ciVec=as.numeric(ci1)
+pdf(file="ROC.pdf", width=5, height=5)
+plot(roc1, print.auc=TRUE, col="red", legacy.axes=T, main="Train group")
+text(0.39, 0.43, paste0("95% CI: ",sprintf("%.03f",ciVec[1]),"-",sprintf("%.03f",ciVec[3])), col="red")
+dev.off()
+
+
+
+
+
+
+library("WGCNA")                     
+setwd()                      
+data=read.table("m6aGeneExp.txt",sep="\t",header=T,check.names=F,row.names=1)     
+
+
+group=sapply(strsplit(colnames(data),"\\-"),"[",4)
+group=sapply(strsplit(group,""),"[",1)
+group=gsub("2","1",group)
+data=data[,group==0]
+datExpr0=t(data)
+
+
+gsg = goodSamplesGenes(datExpr0, verbose = 3)
+if (!gsg$allOK)
+{
+  # Optionally, print the gene and sample names that were removed:
+  if (sum(!gsg$goodGenes)>0)
+    printFlush(paste("Removing genes:", paste(names(datExpr0)[!gsg$goodGenes], collapse = ", ")))
+  if (sum(!gsg$goodSamples)>0)
+    printFlush(paste("Removing samples:", paste(rownames(datExpr0)[!gsg$goodSamples], collapse = ", ")))
+  # Remove the offending genes and samples from the data:
+  datExpr0 = datExpr0[gsg$goodSamples, gsg$goodGenes]
+}
+
+
+sampleTree = hclust(dist(datExpr0), method = "average")
+pdf(file = "1_sample_cluster.pdf", width = 12, height = 9)
+par(cex = 0.6)
+par(mar = c(0,4,2,0))
+plot(sampleTree, main = "Sample clustering to detect outliers", sub="", xlab="", cex.lab = 1.5, cex.axis = 1.5, cex.main = 2)
+
+abline(h = 10000, col = "red")
+dev.off()
+
+
+clust = cutreeStatic(sampleTree, cutHeight = 10000, minSize = 10)
+table(clust)
+keepSamples = (clust==1)
+datExpr0 = datExpr0[keepSamples, ]
+
+
+
+traitData = read.table("score.txt",row.names=1,header=T,comment.char = "",check.names=F)
+fpkmSamples = rownames(datExpr0)
+traitSamples =rownames(traitData)
+sameSample=intersect(fpkmSamples,traitSamples)
+datExpr0=datExpr0[sameSample,]
+datTraits=traitData[sameSample,]
+
+
+
+sampleTree2 = hclust(dist(datExpr0), method = "average")
+traitColors = numbers2colors(datTraits, signed = FALSE)
+pdf(file="2_sample_heatmap.pdf",width=12,height=12)
+plotDendroAndColors(sampleTree2, traitColors,
+                    groupLabels = names(datTraits),
+                    main = "Sample dendrogram and trait heatmap")
+dev.off()
+
+
+enableWGCNAThreads()   
+powers = c(1:20)      
+sft = pickSoftThreshold(datExpr0, powerVector = powers, verbose = 5)
+pdf(file="3_scale_independence.pdf",width=9,height=5)
+par(mfrow = c(1,2))
+cex1 = 0.9
+
+plot(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+     xlab="Soft Threshold (power)",ylab="Scale Free Topology Model Fit,signed R^2",type="n",
+     main = paste("Scale independence"));
+text(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+     labels=powers,cex=cex1,col="red");
+abline(h=0.90,col="red") 
+
+plot(sft$fitIndices[,1], sft$fitIndices[,5],
+     xlab="Soft Threshold (power)",ylab="Mean Connectivity", type="n",
+     main = paste("Mean connectivity"))
+text(sft$fitIndices[,1], sft$fitIndices[,5], labels=powers, cex=cex1,col="red")
+dev.off()
+
+
+
+sft 
+softPower =sft$powerEstimate 
+adjacency = adjacency(datExpr0, power = 5)
+
+
+TOM = TOMsimilarity(adjacency);
+dissTOM = 1-TOM
+
+
+geneTree = hclust(as.dist(dissTOM), method = "average");
+pdf(file="4_gene_clustering.pdf",width=12,height=9)
+plot(geneTree, xlab="", sub="", main = "Gene clustering on TOM-based dissimilarity",
+     labels = FALSE, hang = 0.04)
+dev.off()
+
+
+
+minModuleSize = 20   
+dynamicMods = cutreeDynamic(dendro = geneTree, distM = dissTOM,
+                            deepSplit = 2, pamRespectsDendro = FALSE,
+                            minClusterSize = minModuleSize);
+table(dynamicMods)
+dynamicColors = labels2colors(dynamicMods)
+table(dynamicColors)
+pdf(file="5_Dynamic_Tree.pdf",width=8,height=6)
+plotDendroAndColors(geneTree, dynamicColors, "Dynamic Tree Cut",
+                    dendroLabels = FALSE, hang = 0.03,
+                    addGuide = TRUE, guideHang = 0.05,
+                    main = "Gene dendrogram and module colors")
+dev.off()
+
+
+
+MEList = moduleEigengenes(datExpr0, colors = dynamicColors)
+MEs = MEList$eigengenes
+MEDiss = 1-cor(MEs);
+METree = hclust(as.dist(MEDiss), method = "average")
+pdf(file="6_Clustering_module.pdf",width=7,height=6)
+plot(METree, main = "Clustering of module eigengenes",
+     xlab = "", sub = "")
+MEDissThres = 0.3 
+abline(h=MEDissThres, col = "red")
+dev.off()
+
+
+
+merge = mergeCloseModules(datExpr0, dynamicColors, cutHeight = MEDissThres, verbose = 3)
+mergedColors = merge$colors
+mergedMEs = merge$newMEs
+pdf(file="7_merged_dynamic.pdf", width = 9, height = 6)
+plotDendroAndColors(geneTree, cbind(dynamicColors, mergedColors),
+                    c("Dynamic Tree Cut", "Merged dynamic"),
+                    dendroLabels = FALSE, hang = 0.03,
+                    addGuide = TRUE, guideHang = 0.05)
+dev.off()
+moduleColors = mergedColors
+table(moduleColors)
+colorOrder = c("grey", standardColors(50))
+moduleLabels = match(moduleColors, colorOrder)-1
+MEs = mergedMEs
+
+
+
+nGenes = ncol(datExpr0)
+nSamples = nrow(datExpr0)
+moduleTraitCor = cor(MEs, datTraits, use = "p")
+moduleTraitPvalue = corPvalueStudent(moduleTraitCor, nSamples)
+pdf(file="8_Module_trait.pdf",width=6,height=6)
+textMatrix = paste(signif(moduleTraitCor, 2), "\n(",
+                   signif(moduleTraitPvalue, 1), ")", sep = "")
+dim(textMatrix) = dim(moduleTraitCor)
+par(mar = c(5, 10, 3, 3))
+labeledHeatmap(Matrix = moduleTraitCor,
+               xLabels = names(datTraits),
+               yLabels = names(MEs),
+               ySymbols = names(MEs),
+               colorLabels = FALSE,
+               colors = blueWhiteRed(50),
+               textMatrix = textMatrix,
+               setStdMargins = FALSE,
+               cex.text = 0.5,
+               zlim = c(-1,1),
+               main = paste("Module-trait relationships"))
+dev.off()
+
+
+
+modNames = substring(names(MEs), 3)
+geneModuleMembership = as.data.frame(cor(datExpr0, MEs, use = "p"))
+MMPvalue = as.data.frame(corPvalueStudent(as.matrix(geneModuleMembership), nSamples))
+names(geneModuleMembership) = paste("MM", modNames, sep="")
+names(MMPvalue) = paste("p.MM", modNames, sep="")
+traitNames=names(datTraits)
+geneTraitSignificance = as.data.frame(cor(datExpr0, datTraits, use = "p"))
+GSPvalue = as.data.frame(corPvalueStudent(as.matrix(geneTraitSignificance), nSamples))
+names(geneTraitSignificance) = paste("GS.", traitNames, sep="")
+names(GSPvalue) = paste("p.GS.", traitNames, sep="")
+
+
+
+for (trait in traitNames){
+  traitColumn=match(trait,traitNames)  
+  for (module in modNames){
+    column = match(module, modNames)
+    moduleGenes = moduleColors==module
+    if (nrow(geneModuleMembership[moduleGenes,]) > 1){
+      outPdf=paste("9_", trait, "_", module,".pdf",sep="")
+      pdf(file=outPdf,width=7,height=7)
+      par(mfrow = c(1,1))
+      verboseScatterplot(abs(geneModuleMembership[moduleGenes, column]),
+                         abs(geneTraitSignificance[moduleGenes, traitColumn]),
+                         xlab = paste("Module Membership in", module, "module"),
+                         ylab = paste("Gene significance for ",trait),
+                         main = paste("Module membership vs. gene significance\n"),
+                         cex.main = 1.2, cex.lab = 1.2, cex.axis = 1.2, col = module)
+      abline(v=0.8,h=0.5,col="red")
+      dev.off()
+    }
+  }
+}
+
+
+
+probes = colnames(datExpr0)
+geneInfo0 = data.frame(probes= probes,
+                       moduleColor = moduleColors)
+for (Tra in 1:ncol(geneTraitSignificance))
+{
+  oldNames = names(geneInfo0)
+  geneInfo0 = data.frame(geneInfo0, geneTraitSignificance[,Tra],
+                         GSPvalue[, Tra])
+  names(geneInfo0) = c(oldNames,names(geneTraitSignificance)[Tra],
+                       names(GSPvalue)[Tra])
+}
+
+for (mod in 1:ncol(geneModuleMembership))
+{
+  oldNames = names(geneInfo0)
+  geneInfo0 = data.frame(geneInfo0, geneModuleMembership[,mod],
+                         MMPvalue[, mod])
+  names(geneInfo0) = c(oldNames,names(geneModuleMembership)[mod],
+                       names(MMPvalue)[mod])
+}
+geneOrder =order(geneInfo0$moduleColor)
+geneInfo = geneInfo0[geneOrder, ]
+write.table(geneInfo, file = "GS_MM.xls",sep="\t",row.names=F)
+
+
+
